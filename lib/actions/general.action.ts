@@ -1,10 +1,50 @@
-"use server";
+'use server';
 
 import { generateObject } from "ai";
 import { google } from "@ai-sdk/google";
 
 import { db } from "@/firebase/admin";
 import { feedbackSchema } from "@/constants";
+
+interface CreateFeedbackParams {
+  interviewId: string;
+  userId: string;
+  transcript: SavedMessage[]; // Array of { role, content }
+  feedbackId?: string;
+}
+
+interface GetFeedbackByInterviewIdParams {
+  interviewId: string;
+  userId: string;
+}
+
+interface GetLatestInterviewsParams {
+  userId: string;
+  limit?: number;
+}
+
+interface Interview {
+  id: string;
+  userId: string;
+  type: string;
+  questions: string[];
+  status: 'active' | 'completed';
+  createdAt: string;
+  transcript?: SavedMessage[]; // FIXED: Add transcript field
+  endedAt?: string;
+}
+
+interface Feedback {
+  id: string;
+  interviewId: string;
+  userId: string;
+  totalScore: number;
+  categoryScores: any;
+  strengths: string[];
+  areasForImprovement: string[];
+  finalAssessment: string;
+  createdAt: string;
+}
 
 export async function createFeedback(params: CreateFeedbackParams) {
   const { interviewId, userId, transcript, feedbackId } = params;
@@ -18,7 +58,7 @@ export async function createFeedback(params: CreateFeedbackParams) {
       .join("");
 
     const { object } = await generateObject({
-      model: google("gemini-2.0-flash-001", {
+      model: google("gemini-2.0-flash-001", { // FIXED: Stable model
         structuredOutputs: false,
       }),
       schema: feedbackSchema,
