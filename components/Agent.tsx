@@ -51,12 +51,16 @@ const Agent = ({
   const [error, setError] = useState<string | null>(null);
   const [permissionGranted, setPermissionGranted] = useState(false);
   const [statusText, setStatusText] = useState("");
+  // NEW: For accumulating user transcript during continuous listening
+  const [userTranscript, setUserTranscript] = useState("");
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const synthesisQueueRef = useRef<string[]>([]);
   const messagesRef = useRef<SavedMessage[]>([]);
   const isInitialGreetingRef = useRef(true);
   const ttsTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const speakingStartRef = useRef<number>(0);
+  // NEW: For 3-second silence detection timer
+  const silenceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Types for Web Speech API
   interface SpeechRecognitionEvent {
@@ -74,6 +78,40 @@ const Agent = ({
   interface SpeechRecognitionAlternative {
     transcript: string;
   }
+
+  // NEW: Detect silence after 3 seconds of no new speech
+  const detectSilence = useCallback((finalTranscript: string) => {
+    if (silenceTimeoutRef.current) {
+      clearTimeout(silenceTimeoutRef.current);
+      silenceTimeoutRef.current = null;
+    }
+
+    // Set 3-second timer for silence
+    silenceTimeoutRef.current = setTimeout(() => {
+      if (finalTranscript.trim()) {
+        console.log('Silence detected after 3s. Processing user response:', finalTranscript);
+        setStatusText("Processing your response...");
+        const newMessage = { role: 'user' as const, content: finalTranscript };
+        const updatedMessages = [...messagesRef.current, newMessage];
+        setMessages(updatedMessages);
+        setLastMessage(finalTranscript);
+        setUserTranscript(""); // Reset for next turn
+        setIsListening(false);
+
+        // Stop recognition after processing
+        if (recognitionRef.current) {
+          recognitionRef.current.stop();
+        }
+
+        const fullHistory = updatedMessages.map(m => `${m.role}: ${m.content}`).join('\n');
+        handleAIResponse(updatedMessages, finalTranscript, fullHistory);
+      }
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current);
+        silenceTimeoutRef.current = null;
+      }
+    }, 3000); // FIXED: 3 seconds
+  }, [setMessages, setLastMessage, setIsListening]);
 
   // Sync ref with state
   useEffect(() => {
@@ -98,7 +136,7 @@ const Agent = ({
     }
   };
 
-  // Create fresh recognition instance - stable, no extra deps
+  // FIXED: Updated createRecognition for continuous listening + silence detection
   const createRecognition = useCallback(() => {
     const SpeechRecognitionAPI = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognitionAPI) {
@@ -111,36 +149,46 @@ const Agent = ({
       recognitionRef.current.stop();
       recognitionRef.current = null;
     }
+    if (silenceTimeoutRef.current) {
+      clearTimeout(silenceTimeoutRef.current);
+      silenceTimeoutRef.current = null;
+    }
 
     const recognition = new SpeechRecognitionAPI() as SpeechRecognition;
     recognition.lang = 'en-US';
-    recognition.continuous = false;
-    recognition.interimResults = false;
+    recognition.continuous = true; // FIXED: Enable continuous for real-time
+    recognition.interimResults = true; // FIXED: Enable interim for streaming
     recognition.maxAlternatives = 1;
 
     recognition.onstart = () => {
-      console.log('Listening started');
+      console.log('Listening started (continuous)');
       setIsListening(true);
       setShowSpeakButton(false);
-      setStatusText("Listening... Speak now!");
+      setStatusText("Listening... Speak now! (3s pause to process)"); // UPDATED: Note for 3s
       setIsSpeaking(false);
+      setUserTranscript(""); // Reset transcript on start
     };
 
-    recognition.onresult = async (event: SpeechRecognitionEvent) => {
-      const userResponse = event.results[0][0].transcript;
-      console.log('User response captured:', userResponse);
-      setStatusText("Processing your response...");
-      const newMessage = { role: 'user' as const, content: userResponse };
-      const updatedMessages = [...messagesRef.current, newMessage];
-      setMessages(updatedMessages);
-      setLastMessage(userResponse);
-      setIsListening(false);
+    // FIXED: Accumulate transcript and detect silence
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
+      let interimTranscript = "";
+      let finalTranscript = userTranscript; // Start with existing
 
-      // Stop recognition but keep ref until onend for clean shutdown
-      recognition.stop();
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        if (result.isFinal) {
+          finalTranscript += result[0].transcript;
+        } else {
+          interimTranscript += result[0].transcript;
+        }
+      }
 
-      const fullHistory = updatedMessages.map(m => `${m.role}: ${m.content}`).join('\n');
-      await handleAIResponse(updatedMessages, userResponse, fullHistory);
+      // Append to state (interim shows live, but we use full for processing)
+      setUserTranscript(finalTranscript + interimTranscript);
+      console.log('Live transcript:', finalTranscript + interimTranscript);
+
+      // Reset silence timer on any speech
+      detectSilence(finalTranscript + interimTranscript);
     };
 
     recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
@@ -153,7 +201,11 @@ const Agent = ({
       } else if (event.error !== 'aborted') {
         setError(`Listening error: ${event.error}. Tap to retry.`);
       }
-      // Always null on error to force recreation
+      // Clean up timer on error
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current);
+        silenceTimeoutRef.current = null;
+      }
       recognitionRef.current = null;
     };
 
@@ -162,13 +214,17 @@ const Agent = ({
       setIsListening(false);
       setShowSpeakButton(true);
       setStatusText("Ready to speak? Tap the mic.");
-      // Null ref after end to allow fresh creation next time
+      // Clean up timer on end
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current);
+        silenceTimeoutRef.current = null;
+      }
       recognitionRef.current = null;
     };
 
     recognitionRef.current = recognition;
     return recognition;
-  }, [setMessages, setLastMessage, setIsListening]); // Only setters, stable
+  }, [setMessages, setLastMessage, setIsListening, userTranscript, detectSilence]); // Added deps for transcript/timer
 
   // Start listening - always recreate if needed
   const startListening = useCallback(() => {
@@ -196,7 +252,7 @@ const Agent = ({
       if (recognitionRef.current) {
         speechSynthesis.cancel();
         recognitionRef.current.start();
-        console.log('Recognition started successfully');
+        console.log('Recognition started successfully (continuous)');
       } else {
         console.log('Recognition stale or invalid, retrying...');
         setError('Microphone setup failed. Tap mic again.');
@@ -205,12 +261,16 @@ const Agent = ({
     }, 150); // Slightly longer delay
   }, [callStatus, isSpeaking, isListening, createRecognition]);
 
-  // Cleanup on unmount
+  // Cleanup on unmount - FIXED: Added silence timer cleanup
   useEffect(() => {
     return () => {
       if (recognitionRef.current) {
         recognitionRef.current.stop();
         recognitionRef.current = null;
+      }
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current);
+        silenceTimeoutRef.current = null;
       }
       speechSynthesis.cancel();
       if (ttsTimeoutRef.current) clearTimeout(ttsTimeoutRef.current);
@@ -398,8 +458,10 @@ const Agent = ({
     setIsGenerating(false);
     setPermissionGranted(false);
     setStatusText("");
+    setUserTranscript(""); // FIXED: Reset transcript
     synthesisQueueRef.current = [];
     if (ttsTimeoutRef.current) clearTimeout(ttsTimeoutRef.current);
+    if (silenceTimeoutRef.current) clearTimeout(silenceTimeoutRef.current); // FIXED: Reset timer
     speakingStartRef.current = 0;
     isInitialGreetingRef.current = true;
 
@@ -442,6 +504,7 @@ const Agent = ({
       recognitionRef.current = null;
     }
     if (ttsTimeoutRef.current) clearTimeout(ttsTimeoutRef.current);
+    if (silenceTimeoutRef.current) clearTimeout(silenceTimeoutRef.current); // FIXED: Reset timer
     speakingStartRef.current = 0;
     isInitialGreetingRef.current = true;
     setStatusText("Generating feedback..."); // UI feedback
@@ -486,7 +549,7 @@ const Agent = ({
               ) : (
                 <MicOff className="h-5 w-5 text-gray-400" title="Ready" />
               )}
-              {isListening && <p className="text-xs text-blue-500">Speak now!</p>}
+              {isListening && <p className="text-xs text-blue-500">Speak now! (3s pause to process)</p>} {/* FIXED: Updated note */}
               {showSpeakButton && <p className="text-xs text-gray-500">Tap to speak</p>}
               {isGenerating && <p className="text-xs text-purple-500">AI thinking...</p>}
             </div>
