@@ -26,7 +26,7 @@ interface SavedMessage {
 interface AgentProps {
   userName: string;
   userId: string;
-  interviewId: string;
+  interviewId?: string; // Optional for generate/direct starts
   feedbackId?: string;
   type: string;
   questions?: string[];
@@ -357,31 +357,34 @@ const Agent = ({
     }
   };
 
-  // Feedback
+  // FIXED: Feedback useEffect - Always generate (removed type="generate" skip)
   useEffect(() => {
     if (messages.length > 0) setLastMessage(messages[messages.length - 1].content);
 
     const handleGenerateFeedback = async (msgs: SavedMessage[]) => {
       console.log("Generating feedback...");
-      const { success, feedbackId: id } = await createFeedback({
-        interviewId: interviewId!,
+      const res = await createFeedback({
+        interviewId, // Optional - creates new if missing
         userId: userId!,
         transcript: msgs,
         feedbackId,
+        type, // For new interview creation
+        questions,
       });
 
-      if (success && id) {
-        router.push(`/interview/${interviewId}/feedback`);
+      if (res.success && res.interviewId) {
+        router.push(`/interview/${res.interviewId}/feedback`); // Navigate to new/returned ID
       } else {
-        router.push("/");
+        console.error("Feedback generation failed");
+        router.push("/"); // Fallback to home
       }
     };
 
     if (callStatus === CallStatus.FINISHED) {
-      if (type === "generate") router.push("/");
-      else handleGenerateFeedback(messages);
+      // FIXED: Always generate feedback, regardless of type
+      handleGenerateFeedback(messages);
     }
-  }, [messages, callStatus, feedbackId, interviewId, router, type, userId]);
+  }, [messages, callStatus, feedbackId, interviewId, router, type, userId, questions]); // Added questions dep
 
   const handleCall = async () => {
     console.log('Starting interview');
@@ -429,7 +432,7 @@ const Agent = ({
 
   const handleDisconnect = () => {
     console.log('Ending interview');
-    setCallStatus(CallStatus.FINISHED);
+    setCallStatus(CallStatus.FINISHED); // Triggers useEffect for feedback
     setIsListening(false);
     setIsSpeaking(false);
     setShowSpeakButton(false);
@@ -441,37 +444,7 @@ const Agent = ({
     if (ttsTimeoutRef.current) clearTimeout(ttsTimeoutRef.current);
     speakingStartRef.current = 0;
     isInitialGreetingRef.current = true;
-    setStatusText("Generating feedback...");
-    // Save transcript to interview doc in Firebase only if interviewId is valid
-    if (interviewId && typeof interviewId === 'string' && interviewId.trim() !== '') {
-      updateInterviewTranscript(interviewId.trim(), messages).then(() => {
-        setStatusText("Interview ended.");
-      }).catch((err) => {
-        console.error('Error saving transcript:', err);
-        setStatusText("Interview ended.");
-      });
-    } else {
-      console.warn('No valid interviewId available to save transcript:', interviewId);
-      setStatusText("Interview ended.");
-    }
-  };
-
-  // Save transcript to Firebase (client-side)
-  const updateInterviewTranscript = async (id: string, transcript: SavedMessage[]) => {
-    if (!id || typeof id !== 'string' || id.trim() === '') {
-      throw new Error('Invalid interviewId provided');
-    }
-    try {
-      await updateDoc(doc(db, 'interviews', id), {
-        transcript, // Save full messages array
-        status: 'completed', // Mark as completed
-        endedAt: new Date().toISOString(),
-      });
-      console.log('Interview transcript saved to Firebase');
-    } catch (err) {
-      console.error('Failed to save transcript:', err);
-      throw err;
-    }
+    setStatusText("Generating feedback..."); // UI feedback
   };
 
   if (error) {

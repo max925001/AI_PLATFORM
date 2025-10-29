@@ -6,16 +6,37 @@ import { google } from "@ai-sdk/google";
 import { db } from "@/firebase/admin";
 import { feedbackSchema } from "@/constants";
 
+interface SavedMessage {
+  role: "user" | "system" | "assistant";
+  content: string;
+}
+
 interface CreateFeedbackParams {
-  interviewId: string;
+  interviewId?: string; // FIXED: Optional for new creations
   userId: string;
   transcript: SavedMessage[]; // Array of { role, content }
   feedbackId?: string;
+  type?: string; // NEW: For new interview creation
+  questions?: string[]; // NEW: For techstack
+}
+
+interface CreateMockInterviewParams {
+  userId: string;
+  type: string;
+  transcript?: SavedMessage[];
+  role?: string;
+  techstack?: string[];
+  questions?: string[];
 }
 
 interface GetFeedbackByInterviewIdParams {
   interviewId: string;
   userId: string;
+}
+
+interface GetFeedbacksByUserIdParams {
+  userId: string;
+  limit?: number;
 }
 
 interface GetLatestInterviewsParams {
@@ -27,11 +48,14 @@ interface Interview {
   id: string;
   userId: string;
   type: string;
+  role: string;
+  techstack: string[];
   questions: string[];
   status: 'active' | 'completed';
   createdAt: string;
-  transcript?: SavedMessage[]; // FIXED: Add transcript field
+  transcript?: SavedMessage[];
   endedAt?: string;
+  finalized?: boolean;
 }
 
 interface Feedback {
@@ -46,8 +70,61 @@ interface Feedback {
   createdAt: string;
 }
 
+export async function createMockInterview(params: CreateMockInterviewParams) {
+  const { userId, type, transcript = [], role = type, techstack = [], questions = [] } = params;
+
+  try {
+    const interviewRef = db.collection("interviews").doc();
+    const interview: Interview = {
+      id: interviewRef.id,
+      userId,
+      type,
+      role,
+      techstack,
+      questions,
+      status: transcript.length > 0 ? 'completed' : 'active', // NEW: Completed if transcript provided
+      createdAt: new Date().toISOString(),
+      transcript,
+      endedAt: transcript.length > 0 ? new Date().toISOString() : undefined,
+      finalized: transcript.length > 0, // NEW: For queries
+    };
+
+    await interviewRef.set(interview);
+
+    return { success: true, interviewId: interviewRef.id };
+  } catch (error) {
+    console.error("Error creating mock interview:", error);
+    return { success: false, interviewId: null };
+  }
+}
+
 export async function createFeedback(params: CreateFeedbackParams) {
-  const { interviewId, userId, transcript, feedbackId } = params;
+  const { interviewId, userId, transcript, feedbackId, type, questions } = params;
+
+  // FIXED: Handle no interviewId by creating new
+  let currentInterviewId = interviewId;
+  if (!currentInterviewId) {
+    const res = await createMockInterview({
+      userId,
+      type: type || 'general',
+      transcript,
+      techstack: questions || [],
+      questions: questions || [],
+    });
+    if (!res.success || !res.interviewId) {
+      console.error("Failed to create interview for feedback");
+      return { success: false };
+    }
+    currentInterviewId = res.interviewId;
+  } else {
+    // If ID exists, update transcript and status
+    await db.collection("interviews").doc(currentInterviewId).update({
+      transcript,
+      status: 'completed',
+      endedAt: new Date().toISOString(),
+      finalized: true,
+    }).catch(err => console.error("Error updating interview:", err));
+  }
 
   try {
     const formattedTranscript = transcript
@@ -58,7 +135,7 @@ export async function createFeedback(params: CreateFeedbackParams) {
       .join("");
 
     const { object } = await generateObject({
-      model: google("gemini-2.0-flash-001", { // FIXED: Stable model
+      model: google("gemini-2.0-flash-001", {
         structuredOutputs: false,
       }),
       schema: feedbackSchema,
@@ -79,7 +156,7 @@ export async function createFeedback(params: CreateFeedbackParams) {
     });
 
     const feedback = {
-      interviewId: interviewId,
+      interviewId: currentInterviewId!,
       userId: userId,
       totalScore: object.totalScore,
       categoryScores: object.categoryScores,
@@ -99,7 +176,7 @@ export async function createFeedback(params: CreateFeedbackParams) {
 
     await feedbackRef.set(feedback);
 
-    return { success: true, feedbackId: feedbackRef.id };
+    return { success: true, feedbackId: feedbackRef.id, interviewId: currentInterviewId! };
   } catch (error) {
     console.error("Error saving feedback:", error);
     return { success: false };
@@ -109,7 +186,9 @@ export async function createFeedback(params: CreateFeedbackParams) {
 export async function getInterviewById(id: string): Promise<Interview | null> {
   const interview = await db.collection("interviews").doc(id).get();
 
-  return interview.data() as Interview | null;
+  if (!interview.exists) return null;
+
+  return { id: interview.id, ...interview.data() } as Interview | null;
 }
 
 export async function getFeedbackByInterviewId(
@@ -130,6 +209,27 @@ export async function getFeedbackByInterviewId(
   return { id: feedbackDoc.id, ...feedbackDoc.data() } as Feedback;
 }
 
+// NEW: Get feedbacks by userId for Home
+export async function getFeedbacksByUserId(
+  params: GetFeedbacksByUserIdParams
+): Promise<Feedback[] | null> {
+  const { userId, limit = 20 } = params;
+
+  const querySnapshot = await db
+    .collection("feedback")
+    .where("userId", "==", userId)
+    .orderBy("createdAt", "desc")
+    .limit(limit)
+    .get();
+
+  if (querySnapshot.empty) return null;
+
+  return querySnapshot.docs.map((doc) => ({
+    id: doc.id,
+    ...doc.data(),
+  })) as Feedback[];
+}
+
 export async function getLatestInterviews(
   params: GetLatestInterviewsParams
 ): Promise<Interview[] | null> {
@@ -142,6 +242,8 @@ export async function getLatestInterviews(
     .where("userId", "!=", userId)
     .limit(limit)
     .get();
+
+  if (interviews.empty) return null;
 
   return interviews.docs.map((doc) => ({
     id: doc.id,
@@ -157,6 +259,8 @@ export async function getInterviewsByUserId(
     .where("userId", "==", userId)
     .orderBy("createdAt", "desc")
     .get();
+
+  if (interviews.empty) return null;
 
   return interviews.docs.map((doc) => ({
     id: doc.id,
