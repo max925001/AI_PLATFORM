@@ -267,3 +267,37 @@ export async function getInterviewsByUserId(
     ...doc.data(),
   })) as Interview[];
 }
+
+
+import { collection, query, where, getDocs, orderBy } from "firebase/firestore";
+
+export const getAllFeedbacksByUserId = async (userId: string) => {
+  try {
+    console.log("userid",userId)
+    const q = query(
+      collection(db, "feedback"), // Change to your collection name (e.g., "interviews" if feedback is a subfield)
+      where("userId", "==", userId), // Assumes feedbacks docs have a 'userId' field
+      orderBy("createdAt", "asc") // Sort by date for chronological chart
+    );
+
+    console.log("Executing query for feedbacks with userId:", userId); // Debug log
+    console.log("Query details:", q); // Debug log
+    const querySnapshot = await getDocs(q);
+    const feedbacks = querySnapshot.docs.map((doc) => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        ...data,
+        // Ensure types match your Feedback interface (e.g., cast strings to numbers if needed)
+        totalScore: data.totalScore || 0, // Fallback if missing
+        createdAt: data.createdAt?.toDate().toISOString() || new Date().toISOString(), // Convert Firestore timestamp to ISO string
+        role: data.role || "Unknown Role", // Fallback
+      } as Feedback;
+    });
+    console.log("Fetched feedbacks:", feedbacks); // Debug log: Check browser console
+    return feedbacks;
+  } catch (error) {
+    console.error("Error fetching all feedbacks:", error);
+    return []; // Always return empty array on error to avoid crashes
+  }
+};

@@ -1,4 +1,5 @@
 import Agent from "@/components/Agent";
+import Footer from "@/components/Footer";
 import { getCurrentUser } from "@/lib/actions/auth.action";
 
 const Page = async () => {
@@ -14,6 +15,7 @@ const Page = async () => {
         profileImage={user?.profileURL}
         type="generate"
       />
+       <Footer />
     </>
   );
 };
